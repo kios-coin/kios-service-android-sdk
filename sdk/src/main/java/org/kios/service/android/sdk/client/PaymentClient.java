@@ -1,0 +1,262 @@
+package org.kios.service.android.sdk.client;
+
+import org.kios.service.android.sdk.data.NetWorkType;
+import org.kios.service.android.sdk.data.payment.PaymentInfo;
+import org.kios.service.android.sdk.data.payment.PaymentTaskItem;
+import org.kios.service.android.sdk.utils.CommonUtils;
+import org.jetbrains.annotations.NotNull;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.web3j.crypto.Credentials;
+import org.web3j.crypto.ECKeyPair;
+import org.web3j.utils.Numeric;
+
+import java.io.OutputStream;
+import java.math.BigInteger;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * The client that processes payments using points.
+ * It has the role of delivering input from the KIOSK to the loyalty system.
+ */
+public class PaymentClient extends Client {
+    /**
+     * Message repeater's wallet for payment
+     */
+    protected final Credentials credentials;
+
+    /**
+     * Constructor
+     * @param network Type of network (mainnet, testnet, localhost)
+     * @param privateKey The private key used in the payment
+     */
+    public PaymentClient(NetWorkType network, String privateKey) {
+        super(network);
+        this.credentials = Credentials.create(ECKeyPair.create(new BigInteger(Numeric.cleanHexPrefix(privateKey), 16)));
+    }
+
+    public String getAddress() {
+        return this.credentials.getAddress();
+    }
+
+    /**
+     * It calculates the amount required for payment.
+     * @param account   User's wallet address or temporary address
+     * @param amount    Purchase amount (info. decimals are 18)
+     * @param currency  Currency symbol
+     */
+    public PaymentInfo getPaymentInfo(@NotNull String account, BigInteger amount, String currency) throws Exception {
+        URL url = new URL(String.format("%s/v2/payment/info?account=%s&amount=%s&currency=%s", relayEndpoint, account.trim(), amount.toString(), currency.trim()));
+        HttpURLConnection conn = getHttpURLConnection(url, "GET");
+        JSONObject data = getJSONObjectResponse(conn);
+        return new PaymentInfo(
+                data.getString("account"),
+                new BigInteger(data.getString("amount"), 10),
+                data.getString("currency"),
+                new BigInteger(data.getString("balance"), 10),
+                new BigInteger(data.getString("balanceValue"), 10),
+                new BigInteger(data.getString("paidPoint"), 10),
+                new BigInteger(data.getString("paidValue"), 10),
+                new BigInteger(data.getString("feePoint"), 10),
+                new BigInteger(data.getString("feeValue"), 10),
+                new BigInteger(data.getString("totalPoint"), 10),
+                new BigInteger(data.getString("totalValue"), 10)
+        );
+    }
+
+    public CompletableFuture<PaymentInfo> getPaymentInfoAsync(@NotNull String account, BigInteger amount, String currency) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return getPaymentInfo(account, amount, currency);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    /**
+     * Start a new payment
+     * @param purchaseId    Purchase ID
+     * @param account       User's wallet address or temporary address
+     * @param amount        Purchase amount
+     * @param currency      Currency symbol (case letter)
+     * @param shopId        Shop ID
+     * @param terminalId    Terminal ID
+     */
+    public CompletableFuture<PaymentTaskItem> openNewPayment(String purchaseId, String account, BigInteger amount, String currency, String shopId, String terminalId) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                byte[] message = CommonUtils.getOpenNewPaymentMessage(
+                        purchaseId,
+                        amount,
+                        currency,
+                        shopId,
+                        account,
+                        terminalId
+                );
+                String signature = CommonUtils.signMessage(this.credentials.getEcKeyPair(), message);
+                URL url = new URL(String.format("%s/v2/payment/new/open", relayEndpoint));
+                HttpURLConnection conn = getHttpURLConnection(url, "POST");
+
+                JSONObject body = new JSONObject();
+                body.put("purchaseId", purchaseId);
+                body.put("amount", amount.toString());
+                body.put("currency", currency);
+                body.put("shopId", shopId);
+                body.put("account", account);
+                body.put("terminalId", terminalId);
+                body.put("signature", signature);
+
+                try (OutputStream output = conn.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                return PaymentTaskItem.fromJSONObject(getJSONObjectResponse(conn));
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    /**
+     * Close the new payment
+     * @param paymentId Payment ID
+     * @param confirm If this value is true, the payment will be terminated normally, otherwise the payment will be canceled.
+     */
+    public CompletableFuture<PaymentTaskItem> closeNewPayment(String paymentId, Boolean confirm) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                byte[] message = CommonUtils.getCloseNewPaymentMessage(
+                        paymentId,
+                        confirm
+                );
+                String signature = CommonUtils.signMessage(this.credentials.getEcKeyPair(), message);
+                URL url = new URL(String.format("%s/v2/payment/new/close", relayEndpoint));
+                HttpURLConnection conn = getHttpURLConnection(url, "POST");
+
+                JSONObject body = new JSONObject();
+                body.put("paymentId", paymentId);
+                body.put("confirm", confirm);
+                body.put("signature", signature);
+
+                try (OutputStream output = conn.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                return PaymentTaskItem.fromJSONObject(getJSONObjectResponse(conn));
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    /**
+     * Start processing cancellation of previously completed new payments
+     * @param paymentId  Payment ID
+     * @param terminalId Terminal ID
+     */
+    public CompletableFuture<PaymentTaskItem> openCancelPayment(String paymentId, String terminalId) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                byte[] message = CommonUtils.getOpenCancelPaymentMessage(
+                        paymentId,
+                        terminalId
+                );
+                String signature = CommonUtils.signMessage(this.credentials.getEcKeyPair(), message);
+                URL url = new URL(String.format("%s/v2/payment/cancel/open", relayEndpoint));
+                HttpURLConnection conn = getHttpURLConnection(url, "POST");
+
+                JSONObject body = new JSONObject();
+                body.put("paymentId", paymentId);
+                body.put("terminalId", terminalId);
+                body.put("signature", signature);
+
+                try (OutputStream output = conn.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                return PaymentTaskItem.fromJSONObject(getJSONObjectResponse(conn));
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+
+    /**
+     * Close the cancellation payment
+     * @param paymentId Payment ID
+     * @param confirm If this value is true, the payment will be terminated normally, otherwise the payment will be canceled.
+     */
+    public CompletableFuture<PaymentTaskItem> closeCancelPayment(String paymentId, Boolean confirm) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                byte[] message = CommonUtils.getCloseCancelPaymentMessage(
+                        paymentId,
+                        confirm
+                );
+                String signature = CommonUtils.signMessage(this.credentials.getEcKeyPair(), message);
+                URL url = new URL(String.format("%s/v2/payment/cancel/close", relayEndpoint));
+                HttpURLConnection conn = getHttpURLConnection(url, "POST");
+
+                JSONObject body = new JSONObject();
+                body.put("paymentId", paymentId);
+                body.put("confirm", confirm);
+                body.put("signature", signature);
+
+                try (OutputStream output = conn.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                return PaymentTaskItem.fromJSONObject(getJSONObjectResponse(conn));
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    /**
+     * Provide detailed information on the payment
+     * @param paymentId Payment ID
+     */
+    public CompletableFuture<PaymentTaskItem> getPaymentItem(@NotNull String paymentId) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                URL url = new URL(String.format("%s/v2/payment/item?paymentId=%s", relayEndpoint, paymentId.trim()));
+                HttpURLConnection conn = getHttpURLConnection(url, "GET");
+
+                return PaymentTaskItem.fromJSONObject(getJSONObjectResponse(conn));
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    public CompletableFuture<Long> getLatestTaskSequence() {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                URL url = new URL(relayEndpoint + "/v1/task/sequence/latest");
+                HttpURLConnection conn = getHttpURLConnection(url, "GET");
+                JSONObject data = getJSONObjectResponse(conn);
+                return data.getLong("sequence");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    public CompletableFuture<JSONArray> getTasks(Long sequence) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                URL url = new URL(relayEndpoint + "/v1/task/list/" + String.valueOf(sequence));
+                HttpURLConnection conn = getHttpURLConnection(url, "GET");
+                return getJSONArrayResponse(conn);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+}

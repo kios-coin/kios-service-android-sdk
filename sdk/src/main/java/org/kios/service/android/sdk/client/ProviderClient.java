@@ -1,0 +1,194 @@
+package org.kios.service.android.sdk.client;
+
+import org.kios.service.android.sdk.data.NetWorkType;
+import org.kios.service.android.sdk.utils.CommonUtils;
+import org.jetbrains.annotations.NotNull;
+import org.json.JSONObject;
+import org.web3j.crypto.Credentials;
+import org.web3j.crypto.ECKeyPair;
+import org.web3j.utils.Numeric;
+
+import java.io.OutputStream;
+import java.math.BigInteger;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * The client that is needed to provide a point to the user.
+ * First, you must obtain permission from the loyalty system and register the address of the wallet to be used in the loyalty system.
+ */
+public class ProviderClient extends Client {
+    /**
+     * Message repeater's wallet for providing
+     */
+    protected final Credentials credentials;
+
+    /**
+     * Constructor
+     * @param network Type of network (mainnet, testnet, localhost)
+     * @param privateKey The private key used in the providing
+     */
+    public ProviderClient(NetWorkType network, String privateKey) {
+        super(network);
+        this.credentials = Credentials.create(ECKeyPair.create(new BigInteger(Numeric.cleanHexPrefix(privateKey), 16)));
+    }
+
+    public String getAddress() {
+        return this.credentials.getAddress();
+    }
+
+    /**
+     * Check if the `account` can provide points
+     * @param account Wallet address
+     */
+    public CompletableFuture<Boolean> isProvider(@NotNull String account) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                URL url = new URL(relayEndpoint + "/v1/provider/status/" + account.trim());
+                HttpURLConnection conn = getHttpURLConnection(url, "GET");
+                JSONObject data = getJSONObjectResponse(conn);
+                return data.getBoolean("enable");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+
+    /**
+     * Register the address of the assistant who directly delivers points for the registered wallet(this.wallet).
+     * The assistant's wallet can be registered and used on the server.
+     * The assistant does not have the authority to deposit and withdraw, only has the authority to provide points.
+     * @param account Address of wallet for the agent
+     */
+    public CompletableFuture<String> setAgent(String account) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                long nonce = this.getLedgerNonceOf(this.credentials.getAddress()).get();
+                byte[] message = CommonUtils.getRegisterAgentMessage(
+                        this.credentials.getAddress(),
+                        account,
+                        nonce,
+                        this.getChainId().get()
+                );
+                String signature = CommonUtils.signMessage(this.credentials.getEcKeyPair(), message);
+
+                URL url = new URL(String.format("%s/v1/provider/assistant/register", relayEndpoint));
+                HttpURLConnection conn = getHttpURLConnection(url, "POST");
+
+                JSONObject body = new JSONObject();
+                body.put("provider", this.credentials.getAddress());
+                body.put("assistant", account);
+                body.put("signature", signature);
+
+                try (OutputStream output = conn.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                JSONObject data = getJSONObjectResponse(conn);
+                return data.getString("txHash");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    /**
+     * Provide the agent's address for the registered wallet(this.wallet)
+     * @param provider Provider's wallet address
+     */
+    public CompletableFuture<String> getAgent(String provider) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                URL url = new URL(String.format("%s/v1/provider/assistant/%s", relayEndpoint, provider));
+                HttpURLConnection conn = getHttpURLConnection(url, "GET");
+                JSONObject data = getJSONObjectResponse(conn);
+                return data.getString("assistant");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    /**
+     * Provide the agent's address for the registered wallet(this.wallet)
+     */
+    public CompletableFuture<String> getAgent() throws Exception {
+        return this.getAgent(this.credentials.getAddress());
+    }
+
+    /**
+     * Points are provided to the specified address.
+     * Registered wallets are used for signatures. Registered wallet(this.wallet) may be providers or helpers.
+     * @param provider - wallet address of the resource provider
+     * @param receiver - wallet address of the person who will receive the points
+     * @param amount - amount of points
+     */
+    public CompletableFuture<String> provideToAddress(String provider, String receiver, BigInteger amount) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                long nonce = this.getLedgerNonceOf(this.credentials.getAddress()).get();
+                long chainId = this.getChainId().get();
+                byte[] message = CommonUtils.getProvidePointToAddressMessage(provider, receiver, amount, nonce, chainId);
+                String signature = CommonUtils.signMessage(this.credentials.getEcKeyPair(), message);
+
+                URL url = new URL(String.format("%s/v1/provider/send/account", relayEndpoint));
+                HttpURLConnection conn = getHttpURLConnection(url, "POST");
+
+                JSONObject body = new JSONObject();
+                body.put("provider", provider);
+                body.put("receiver", receiver);
+                body.put("amount", amount.toString());
+                body.put("signature", signature);
+
+                try (OutputStream output = conn.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                JSONObject data = getJSONObjectResponse(conn);
+                return data.getString("txHash");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    /**
+     * Points are provided to the specified phone number.
+     * Registered wallets are used for signatures. Registered wallet(this.wallet) may be providers or helpers.
+     * @param provider - wallet address of the resource provider
+     * @param receiver - phone number of the person who will receive the points
+     * @param amount - amount of points
+     */
+    public CompletableFuture<String> provideToPhone(String provider, String receiver, BigInteger amount) throws Exception {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                long nonce = this.getLedgerNonceOf(this.credentials.getAddress()).get();
+                long chainId = this.getChainId().get();
+                String phoneHash = CommonUtils.getPhoneHash(CommonUtils.getInternationalPhoneNumber(receiver));
+                byte[] message = CommonUtils.getProvidePointToPhoneMessage(provider, phoneHash, amount, nonce, chainId);
+                String signature = CommonUtils.signMessage(this.credentials.getEcKeyPair(), message);
+
+                URL url = new URL(String.format("%s/v1/provider/send/phoneHash", relayEndpoint));
+                HttpURLConnection conn = getHttpURLConnection(url, "POST");
+
+                JSONObject body = new JSONObject();
+                body.put("provider", provider);
+                body.put("receiver", phoneHash);
+                body.put("amount", amount.toString());
+                body.put("signature", signature);
+
+                try (OutputStream output = conn.getOutputStream()) {
+                    output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                JSONObject data = getJSONObjectResponse(conn);
+                return data.getString("txHash");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+}
